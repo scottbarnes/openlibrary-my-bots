@@ -1,9 +1,8 @@
-from collections.abc import Iterator
+import json
 import os
 import requests
 
 from typing import Any, Final
-from isbnlib import is_isbn10, is_isbn13
 from collections import namedtuple
 from olclient import OpenLibrary, config
 
@@ -18,7 +17,9 @@ SECRET_KEY = os.environ["ol_secret_key"]
 # BOT_PASSWORD = os.environ["bot_password"]
 # ISBN_QUERY: Final = "http://localhost:8080/query.json?type=/type/edition&isbn~=*&limit=500"
 # PUBLISHER_QUERY: Final = "http://localhost:8080/query.json?type=/type/edition&publisher~=*&limit=500"
+# GET_PUT_URL: Final = "http://localhost:8080/books/%s.json"
 
+GET_PUT_URL: Final = "https://openlibrary.org/books/%s.json"
 ISBN_QUERY: Final = (
     "https://openlibrary.org/query.json?type=/type/edition&isbn~=*&limit=500"
 )
@@ -55,7 +56,8 @@ def get_editions_to_update(query: str) -> list[str]:
         ["OL123M", "OL456M", ...]
     """
     r = requests.get(query)
-    edition_keys = r.json()[:1]
+    edition_keys = r.json()
+    # edition_keys = r.json()[:5]
     # {'key': '/books/OL20422410M'} -> 'OL20422410M'
     get_id = lambda k: k.get("key").split("/")[-1]
     edition_ids = [get_id(edition) for edition in edition_keys]
@@ -78,12 +80,13 @@ def get_isbn_10_and_13(isbns: list[str]) -> tuple[list[str], list[str]]:
     isbn_13s = []
 
     for isbn in isbns:
-        if is_isbn10(isbn):
-            isbn_10s.append(isbn)
-        elif is_isbn13(isbn):
-            isbn_13s.append(isbn)
-        else:
-            raise NotIsbnError
+        match len(isbn):
+            case 10:
+                isbn_10s.append(isbn)
+            case 13:
+                isbn_13s.append(isbn)
+            case _:
+                raise NotIsbnError
 
     return (isbn_10s, isbn_13s)
 
@@ -94,26 +97,29 @@ def update_isbn_10_and_13(edition) -> Any:
     Move ISBN values from `.isbn` if they are there to their
     respective `.isbn_10` and `.isbn_13` fields.
     """
-    if not hasattr(edition, "isbn") or not edition.isbn:
+    if not edition.get("isbn", None):
         return edition
 
-    isbn_10s, isbn_13s = get_isbn_10_and_13(edition.isbn)
+    isbn_field = edition.get("isbn")
+    print(f"isbn_field is: {isbn_field}")
+
+    isbn_10s, isbn_13s = get_isbn_10_and_13(isbn_field)
 
     # Handle ISBN 10s, appending without duplicating, or creating the field if necessary.
-    if hasattr(edition, "isbn_10") and isbn_10s:
+    if edition.get("isbn_10") and isbn_10s:
         for isbn in isbn_10s:
-            edition.isbn_10.append(isbn) if isbn not in edition.isbn_10 else None
+            edition["isbn_10"].append(isbn) if isbn not in edition["isbn_10"] else None
     elif isbn_10s:
-        edition.isbn_10 = isbn_10s
+        edition["isbn_10"] = isbn_10s
 
     # Handle ISBN 13s, appending without duplicating, or creating the field if necessary.
-    if hasattr(edition, "isbn_13") and isbn_13s:
+    if edition.get("isbn_13") and isbn_13s:
         for isbn in isbn_13s:
-            edition.isbn_13.append(isbn) if isbn not in edition.isbn_13 else None
+            edition["isbn_13"].append(isbn) if isbn not in edition["isbn_13"] else None
     elif isbn_13s:
-        edition.isbn_13 = isbn_13s
+        edition["isbn_13"] = isbn_13s
 
-    delattr(edition, "isbn")
+    del edition["isbn"]
 
     return edition
 
@@ -125,15 +131,17 @@ def update_publishers(edition) -> Any:
     list[str] `.publishers`, or use that value from `.publisher`
     to create `.publishers`. Returns the updated edition.
     """
-    if not hasattr(edition, "publisher") or not edition.publisher:
+    if not edition.get("publisher", None):
         return edition
 
-    if hasattr(edition, "publishers"):
-        edition.publishers.append(edition.publisher) if edition.publisher not in edition.publishers else None
-    else:
-        edition.publishers = [edition.publisher]
+    publisher = edition.get("publisher")
 
-    delattr(edition, "publisher")
+    if publishers := edition.get("publishers", None):
+        publishers.append(publisher) if publisher not in publishers else None
+    else:
+        edition["publishers"] = [publisher]
+
+    del edition["publisher"]
 
     return edition
 
@@ -153,7 +161,9 @@ def main() -> None:
     edition_keys = isbn_editions + publisher_editions
 
     for edition_key in edition_keys:
-        edition = ol.Edition.get(edition_key)
+        # edition = ol.Edition.get(edition_key)
+        r = ol.session.get(GET_PUT_URL % edition_key)
+        edition = r.json()
         print(f"Processing {edition_key}")
 
         if not edition:
@@ -162,7 +172,12 @@ def main() -> None:
         edition = update_isbn_10_and_13(edition)
         edition = update_publishers(edition)
 
-        edition.save(comment="Repairing incorrect publisher and isbn fields per #7448")
+        body = edition
+        body["_comment"] = "Repairing incorrect publisher and isbn fields (#7448)"
+
+        j = json.dumps(body)
+
+        ol.session.put(GET_PUT_URL % edition_key, j)
 
 
 if __name__ == "__main__":

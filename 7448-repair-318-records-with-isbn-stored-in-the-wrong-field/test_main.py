@@ -50,6 +50,12 @@ test_cases = [
         exp=([], []),
         err=NotIsbnError,
     ),
+    ISBN(
+        text="bad check digit",
+        input=["0030802791"],
+        exp=(["0030802792"], []),
+        err=None
+        ),
 ]
 
 
